@@ -1087,14 +1087,28 @@ func (as *authStore) GenTokenPrefix() (string, error) {
 	return as.tokenProvider.genTokenPrefix()
 }
 
-func decomposeOpts(lg *zap.Logger, optstr string) (string, map[string]string, error) {
+// decomposeOpts splits an --auth-token option string into a token type and one or more option groups
+// of the form `jwt,opt=val,...[,jwt,opt=val,...]`. The first comma-separated field is the token type.
+// A following field equal to that token type starts a new option group, which lets a single
+// --auth-token option string specify multiple trusted keys, e.g.,
+//
+//	jwt,pub-key=k1.pem,sign-method=ES256,jwt,pub-key=k2.pem,sign-method=RS256
+//
+// Every group is parsed into its own key=value map; duplicate keys within a group are rejected.
+func decomposeOpts(lg *zap.Logger, optstr string) (string, []map[string]string, error) {
 	opts := strings.Split(optstr, ",")
 	tokenType := opts[0]
 
-	typeSpecificOpts := make(map[string]string)
+	var groups []map[string]string
+	var group map[string]string
 	for i := 1; i < len(opts); i++ {
-		pair := strings.Split(opts[i], "=")
+		// new token type starts a new option group
+		if opts[i] == tokenType {
+			group = nil
+			continue
+		}
 
+		pair := strings.Split(opts[i], "=")
 		if len(pair) != 2 {
 			if lg != nil {
 				lg.Error("invalid token option", zap.String("option", optstr))
@@ -1102,7 +1116,12 @@ func decomposeOpts(lg *zap.Logger, optstr string) (string, map[string]string, er
 			return "", nil, ErrInvalidAuthOpts
 		}
 
-		if _, ok := typeSpecificOpts[pair[0]]; ok {
+		if group == nil {
+			group = make(map[string]string)
+			groups = append(groups, group)
+		}
+
+		if _, ok := group[pair[0]]; ok {
 			if lg != nil {
 				lg.Error(
 					"invalid token option",
@@ -1113,10 +1132,10 @@ func decomposeOpts(lg *zap.Logger, optstr string) (string, map[string]string, er
 			return "", nil, ErrInvalidAuthOpts
 		}
 
-		typeSpecificOpts[pair[0]] = pair[1]
+		group[pair[0]] = pair[1]
 	}
 
-	return tokenType, typeSpecificOpts, nil
+	return tokenType, groups, nil
 }
 
 // NewTokenProvider creates a new token provider.
@@ -1126,7 +1145,7 @@ func NewTokenProvider(
 	indexWaiter func(uint64) <-chan struct{},
 	TokenTTL time.Duration,
 ) (TokenProvider, error) {
-	tokenType, typeSpecificOpts, err := decomposeOpts(lg, tokenOpts)
+	tokenType, optGroups, err := decomposeOpts(lg, tokenOpts)
 	if err != nil {
 		return nil, ErrInvalidAuthOpts
 	}
@@ -1136,10 +1155,20 @@ func NewTokenProvider(
 		if lg != nil {
 			lg.Warn("simple token is not cryptographically signed")
 		}
+		if len(optGroups) > 0 {
+			if lg != nil {
+				lg.Warn(
+					"ignored options for simple token provider",
+					zap.String("options", tokenOpts),
+					zap.Error(ErrInvalidAuthOpts),
+				)
+			}
+			return nil, ErrInvalidAuthOpts
+		}
 		return newTokenProviderSimple(lg, indexWaiter, TokenTTL), nil
 
 	case tokenTypeJWT:
-		return newTokenProviderJWT(lg, typeSpecificOpts)
+		return newTokenProviderJWT(lg, optGroups)
 
 	case "":
 		return newTokenProviderNop()

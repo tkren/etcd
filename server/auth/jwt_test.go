@@ -90,7 +90,7 @@ func TestJWTInfo(t *testing.T) {
 
 func testJWTInfo(t *testing.T, opts map[string]string) {
 	lg := zap.NewNop()
-	jwt, err := newTokenProviderJWT(lg, opts)
+	jwt, err := newTokenProviderJWT(lg, []map[string]string{opts})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func testJWTInfo(t *testing.T, opts map[string]string) {
 			newOpts := make(map[string]string, len(opts))
 			maps.Copy(newOpts, opts)
 			delete(newOpts, "priv-key")
-			verify, err := newTokenProviderJWT(lg, newOpts)
+			verify, err := newTokenProviderJWT(lg, []map[string]string{newOpts})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -185,7 +185,7 @@ func TestJWTTokenWithMissingFields(t *testing.T) {
 			var opts jwtOptions
 			err := opts.ParseWithDefaults(optsMap)
 			require.NoError(t, err)
-			key, err := opts.Key()
+			key, _, err := opts.keyPair()
 			require.NoError(t, err)
 
 			tk := jwt.NewWithClaims(opts.SignMethod, claims)
@@ -193,7 +193,7 @@ func TestJWTTokenWithMissingFields(t *testing.T) {
 			require.NoError(t, err)
 
 			// verify the token
-			jwtProvider, err := newTokenProviderJWT(zap.NewNop(), optsMap)
+			jwtProvider, err := newTokenProviderJWT(zap.NewNop(), []map[string]string{optsMap})
 			require.NoError(t, err)
 			ai, ok := jwtProvider.info(t.Context(), token, 123)
 
@@ -263,7 +263,7 @@ func TestJWTBad(t *testing.T) {
 
 	for k, v := range badCases {
 		t.Run(k, func(t *testing.T) {
-			_, err := newTokenProviderJWT(lg, v)
+			_, err := newTokenProviderJWT(lg, []map[string]string{v})
 			if err == nil {
 				t.Errorf("expected error for options %v", v)
 			}
@@ -274,4 +274,89 @@ func TestJWTBad(t *testing.T) {
 // testJWTOpts is useful for passing to NewTokenProvider which requires a string.
 func testJWTOpts() string {
 	return fmt.Sprintf("%s,pub-key=%s,priv-key=%s,sign-method=RS256", tokenTypeJWT, jwtRSAPubKey, jwtRSAPrivKey)
+}
+
+func signToken(t *testing.T, privKeyFile, signMethod, username string, rev uint64) string {
+	t.Helper()
+	jwtProvider, err := newTokenProviderJWT(zap.NewNop(), []map[string]string{{
+		"priv-key":    privKeyFile,
+		"sign-method": signMethod,
+		"ttl":         "1h",
+	}})
+	require.NoError(t, err)
+	token, err := jwtProvider.assign(t.Context(), username, rev)
+	require.NoError(t, err)
+	return token
+}
+
+// ensures that a verify-only provider configured with multiple pub-key groups accepts tokens signed by any of
+// the corresponding private keys, and rejects tokens signed by a key without corresponding trusted pub-key
+func TestJWTVerifyOnly(t *testing.T) {
+	lg := zap.NewNop()
+	ctx := t.Context()
+
+	ecToken := signToken(t, jwtECPrivKey, "ES256", "ec-user", 1)
+	rsaToken := signToken(t, jwtRSAPrivKey, "RS256", "rsa-user", 2)
+	unknownToken := signToken(t, jwtEdPrivKey, "EdDSA", "unknown-user", 3)
+
+	// a verify-only provider trusting both an ECDSA and an RSA public key
+	jwtProvider, err := newTokenProviderJWT(lg, []map[string]string{
+		{"pub-key": jwtECPubKey, "sign-method": "ES256"},
+		{"pub-key": jwtRSAPubKey, "sign-method": "RS256"},
+	})
+	require.NoError(t, err)
+
+	ai, ok := jwtProvider.info(ctx, ecToken, 1)
+	require.Truef(t, ok, "failed to accept token signed by the ECDSA key")
+	require.Equal(t, "ec-user", ai.Username)
+
+	ai, ok = jwtProvider.info(ctx, rsaToken, 2)
+	require.Truef(t, ok, "failed to accept token signed by the RSA key")
+	require.Equal(t, "rsa-user", ai.Username)
+
+	// a token signed by a key not in the set is rejected
+	_, ok = jwtProvider.info(ctx, unknownToken, 3)
+	require.Falsef(t, ok, "unexpectedly accepted a token signed by a key not in the set")
+}
+
+// ensures that a signing provider (a group with a private key) can also accept tokens issued by additional public keys
+// configured in verify-only groups, and rejects tokens signed by a key without corresponding trusted pub-key
+func TestJWTSigningProviderVerifiesAdditionalKeys(t *testing.T) {
+	lg := zap.NewNop()
+	ctx := t.Context()
+
+	// jwtECPrivKey is a signing group; jwtEdPubKey is an additional verify-only group
+	jwtProvider, err := newTokenProviderJWT(lg, []map[string]string{
+		{"priv-key": jwtECPrivKey, "pub-key": jwtECPubKey, "sign-method": "ES256", "ttl": "1h"},
+		{"pub-key": jwtEdPubKey, "sign-method": "EdDSA"},
+	})
+	require.NoError(t, err)
+	require.False(t, jwtProvider.verifyOnly())
+
+	// sign and verify self-issued token
+	own, err := jwtProvider.assign(ctx, "self", 1)
+	require.NoError(t, err)
+	ai, ok := jwtProvider.info(ctx, own, 1)
+	require.Truef(t, ok, "failed to verify a self-issued token")
+	require.Equal(t, "self", ai.Username)
+
+	// accept token signed externally by the verify-only key
+	external := signToken(t, jwtEdPrivKey, "EdDSA", "external", 2)
+	ai, ok = jwtProvider.info(ctx, external, 2)
+	require.Truef(t, ok, "failed to verify a token signed by the additional key")
+	require.Equal(t, "external", ai.Username)
+
+	// a token signed by an unknown key must be rejected
+	unknownToken := signToken(t, jwtRSAPrivKey, "RS256", "not-trusted", 3)
+	_, ok = jwtProvider.info(ctx, unknownToken, 3)
+	require.Falsef(t, ok, "unexpectedly accepted a token signed by a key not in the set")
+}
+
+// ensures that JWT providers can have at most one signing group
+func TestJWTMultiplePrivateKeys(t *testing.T) {
+	_, err := newTokenProviderJWT(zap.NewNop(), []map[string]string{
+		{"priv-key": jwtECPrivKey, "sign-method": "ES256"},
+		{"priv-key": jwtEdPrivKey, "sign-method": "EdDSA"},
+	})
+	require.ErrorIs(t, err, ErrInvalidAuthOpts)
 }

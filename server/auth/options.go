@@ -93,8 +93,8 @@ func (opts *jwtOptions) Parse(optMap map[string]string) error {
 	return nil
 }
 
-// Key will parse and return the appropriately typed key for the selected signature method
-func (opts *jwtOptions) Key() (any, error) {
+// keyPair will parse and return the appropriately typed key pair (signing key and verification key) for the selected signature method
+func (opts *jwtOptions) keyPair() (any, jwt.VerificationKey, error) {
 	switch opts.SignMethod.(type) {
 	case *jwt.SigningMethodRSA, *jwt.SigningMethodRSAPSS:
 		return opts.rsaKey()
@@ -105,18 +105,18 @@ func (opts *jwtOptions) Key() (any, error) {
 	case *jwt.SigningMethodHMAC:
 		return opts.hmacKey()
 	default:
-		return nil, fmt.Errorf("unsupported signing method: %T", opts.SignMethod)
+		return nil, nil, fmt.Errorf("unsupported signing method: %T", opts.SignMethod)
 	}
 }
 
-func (opts *jwtOptions) hmacKey() (any, error) {
+func (opts *jwtOptions) hmacKey() (any, jwt.VerificationKey, error) {
 	if len(opts.PrivateKey) == 0 {
-		return nil, ErrMissingKey
+		return nil, nil, ErrMissingKey
 	}
-	return opts.PrivateKey, nil
+	return opts.PrivateKey, opts.PrivateKey, nil
 }
 
-func (opts *jwtOptions) rsaKey() (any, error) {
+func (opts *jwtOptions) rsaKey() (any, jwt.VerificationKey, error) {
 	var (
 		priv *rsa.PrivateKey
 		pub  *rsa.PublicKey
@@ -126,35 +126,35 @@ func (opts *jwtOptions) rsaKey() (any, error) {
 	if len(opts.PrivateKey) > 0 {
 		priv, err = jwt.ParseRSAPrivateKeyFromPEM(opts.PrivateKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if len(opts.PublicKey) > 0 {
 		pub, err = jwt.ParseRSAPublicKeyFromPEM(opts.PublicKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if priv == nil {
 		if pub == nil {
 			// Neither key given
-			return nil, ErrMissingKey
+			return nil, nil, ErrMissingKey
 		}
 		// Public key only, can verify tokens
-		return pub, nil
+		return nil, pub, nil
 	}
 
 	// both keys provided, make sure they match
 	if pub != nil && !pub.Equal(priv.Public()) {
-		return nil, ErrKeyMismatch
+		return nil, nil, ErrKeyMismatch
 	}
 
-	return priv, nil
+	return priv, priv.Public(), nil
 }
 
-func (opts *jwtOptions) ecKey() (any, error) {
+func (opts *jwtOptions) ecKey() (any, jwt.VerificationKey, error) {
 	var (
 		priv *ecdsa.PrivateKey
 		pub  *ecdsa.PublicKey
@@ -164,35 +164,35 @@ func (opts *jwtOptions) ecKey() (any, error) {
 	if len(opts.PrivateKey) > 0 {
 		priv, err = jwt.ParseECPrivateKeyFromPEM(opts.PrivateKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if len(opts.PublicKey) > 0 {
 		pub, err = jwt.ParseECPublicKeyFromPEM(opts.PublicKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	if priv == nil {
 		if pub == nil {
 			// Neither key given
-			return nil, ErrMissingKey
+			return nil, nil, ErrMissingKey
 		}
 		// Public key only, can verify tokens
-		return pub, nil
+		return nil, pub, nil
 	}
 
 	// both keys provided, make sure they match
 	if pub != nil && !pub.Equal(priv.Public()) {
-		return nil, ErrKeyMismatch
+		return nil, nil, ErrKeyMismatch
 	}
 
-	return priv, nil
+	return priv, priv.Public(), nil
 }
 
-func (opts *jwtOptions) edKey() (any, error) {
+func (opts *jwtOptions) edKey() (any, jwt.VerificationKey, error) {
 	var (
 		priv ed25519.PrivateKey
 		pub  ed25519.PublicKey
@@ -203,7 +203,7 @@ func (opts *jwtOptions) edKey() (any, error) {
 		var privKey crypto.PrivateKey
 		privKey, err = jwt.ParseEdPrivateKeyFromPEM(opts.PrivateKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		priv = privKey.(ed25519.PrivateKey)
 	}
@@ -212,7 +212,7 @@ func (opts *jwtOptions) edKey() (any, error) {
 		var pubKey crypto.PublicKey
 		pubKey, err = jwt.ParseEdPublicKeyFromPEM(opts.PublicKey)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		pub = pubKey.(ed25519.PublicKey)
 	}
@@ -220,16 +220,16 @@ func (opts *jwtOptions) edKey() (any, error) {
 	if priv == nil {
 		if pub == nil {
 			// Neither key given
-			return nil, ErrMissingKey
+			return nil, nil, ErrMissingKey
 		}
 		// Public key only, can verify tokens
-		return pub, nil
+		return nil, pub, nil
 	}
 
 	// both keys provided, make sure they match
 	if pub != nil && !pub.Equal(priv.Public()) {
-		return nil, ErrKeyMismatch
+		return nil, nil, ErrKeyMismatch
 	}
 
-	return priv, nil
+	return priv, priv.Public(), nil
 }

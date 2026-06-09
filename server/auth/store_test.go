@@ -44,6 +44,73 @@ func dummyIndexWaiter(index uint64) <-chan struct{} {
 	return ch
 }
 
+func TestDecomposeOpts(t *testing.T) {
+	tests := []struct {
+		name          string
+		optstr        string
+		wantTokenType string
+		wantGroups    []map[string]string
+		wantErr       bool
+	}{
+		{
+			name:          "simple",
+			optstr:        "simple",
+			wantTokenType: "simple",
+			wantGroups:    nil,
+		},
+		{
+			name:          "single jwt group",
+			optstr:        "jwt,pub-key=k1.pem,sign-method=ES256",
+			wantTokenType: "jwt",
+			wantGroups: []map[string]string{
+				{"pub-key": "k1.pem", "sign-method": "ES256"},
+			},
+		},
+		{
+			name:          "multiple jwt groups",
+			optstr:        "jwt,priv-key=k1.pem,sign-method=ES256,jwt,pub-key=k2.pem,sign-method=RS256",
+			wantTokenType: "jwt",
+			wantGroups: []map[string]string{
+				{"priv-key": "k1.pem", "sign-method": "ES256"},
+				{"pub-key": "k2.pem", "sign-method": "RS256"},
+			},
+		},
+		{
+			name:    "malformed option",
+			optstr:  "jwt,pub-key",
+			wantErr: true,
+		},
+		{
+			name:    "duplicate key within group",
+			optstr:  "jwt,pub-key=k1.pem,pub-key=k2.pem",
+			wantErr: true,
+		},
+		{
+			name:    "jwt and simple must be rejected",
+			optstr:  "jwt,priv-key=k1.pem,sign-method=RS256,simple",
+			wantErr: true,
+		},
+		{
+			name:    "simple and jwt must be rejected",
+			optstr:  "simple,jwt,pub-key=k1.pem,sign-method=RS256",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenType, groups, err := decomposeOpts(zaptest.NewLogger(t), tt.optstr)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantTokenType, tokenType)
+			require.Equal(t, tt.wantGroups, groups)
+		})
+	}
+}
+
 // TestNewAuthStoreRevision ensures newly auth store
 // keeps the old revision when there are no changes.
 func TestNewAuthStoreRevision(t *testing.T) {
